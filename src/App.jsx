@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
+  LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend
 } from 'recharts';
 import { 
   Users, BookOpen, ArrowUpRight, LayoutDashboard, 
   Calendar, CalendarDays, CalendarRange, Menu, X, 
-  Settings, LogIn, Lock, User, Save, CheckCircle, FileSpreadsheet, FileText, Library, Clock
+  Settings, LogIn, Lock, User, Save, CheckCircle, 
+  Library, Clock, Download, Printer, AlertCircle
 } from 'lucide-react';
 
 // --- FIREBASE IMPORTS ---
@@ -14,6 +15,7 @@ import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged }
 import { getFirestore, doc, setDoc, collection, onSnapshot } from 'firebase/firestore';
 
 // --- FIREBASE CONFIG (CERDAS DUAL-MODE) ---
+// Gunakan config bawaan env jika ada, jika tidak gunakan milik Vercel/Stackblitz Anda
 const customFirebaseConfig = {
   apiKey: "AIzaSyAK1anh6EOnV7LehWokqMwxj42c70muo3E",
   authDomain: "tally-penghitung-pengunjung.firebaseapp.com",
@@ -38,7 +40,7 @@ export default function App() {
 
   // --- STATE SETTINGS ---
   const [settings, setSettings] = useState({
-    logo: 'logo.png',
+    logo: 'https://ui-avatars.com/api/?name=SD&background=0B666A&color=fff&size=256',
     namaKota: 'Gunung Terang',
     namaPustakawan: 'Budi Santoso, S.Pus',
     nipPustakawan: '19800101 201001 1 001', 
@@ -60,6 +62,7 @@ export default function App() {
   
   const [dailyRecords, setDailyRecords] = useState({});
   const [syncStatus, setSyncStatus] = useState('Menghubungkan...');
+  const [syncErrorMsg, setSyncErrorMsg] = useState('');
 
   // --- HELPER DATES ---
   const getLocalDateString = (date) => {
@@ -85,20 +88,21 @@ export default function App() {
   const formatTanggal = (date) => date.toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
   const currentTodayTally = dailyRecords[todayStr] || { pengunjung: 0, pembaca: 0, peminjam: 0, hourly: {} };
 
-  // --- FIREBASE DYNAMIC PATHS ---
+  // --- FIREBASE DYNAMIC PATHS (DIPERBAIKI AGAR AMAN DI VERCEL) ---
   const getSettingsPath = (uid) => {
     if (typeof __app_id !== 'undefined') return doc(db, 'artifacts', envAppId, 'users', uid, 'settings', 'userSettings');
-    return doc(db, 'settings', 'userSettings');
+    // Jika di Vercel, isolasi data per User ID agar tidak bentrok
+    return doc(db, 'users', uid, 'settings', 'userSettings');
   };
 
   const getTalliesCollection = (uid) => {
     if (typeof __app_id !== 'undefined') return collection(db, 'artifacts', envAppId, 'users', uid, 'daily_tallies');
-    return collection(db, 'daily_tallies');
+    return collection(db, 'users', uid, 'daily_tallies');
   };
 
   const getTallyDoc = (uid, dateStr) => {
     if (typeof __app_id !== 'undefined') return doc(db, 'artifacts', envAppId, 'users', uid, 'daily_tallies', dateStr);
-    return doc(db, 'daily_tallies', dateStr);
+    return doc(db, 'users', uid, 'daily_tallies', dateStr);
   };
 
   // --- FIREBASE INIT ---
@@ -110,10 +114,11 @@ export default function App() {
         } else {
           await signInAnonymously(auth);
         }
-        setSyncStatus('Siap');
+        setSyncStatus('Autentikasi Sukses');
       } catch (error) {
         console.error("Firebase Auth Error:", error);
         setSyncStatus('Error Auth');
+        setSyncErrorMsg('Gagal Autentikasi. Pastikan Anonymous Sign-In aktif di Firebase.');
       }
     };
     initAuth();
@@ -125,13 +130,17 @@ export default function App() {
   useEffect(() => {
     if (!user) return; 
 
+    // Sync Settings
     const settingsRef = getSettingsPath(user.uid);
     const unsubSettings = onSnapshot(settingsRef, (docSnap) => {
       if (docSnap.exists()) {
         setSettings(prev => ({ ...prev, ...docSnap.data() }));
       }
+    }, (err) => {
+      console.error("Gagal sync pengaturan:", err);
     });
 
+    // Sync Tallies
     const talliesRef = getTalliesCollection(user.uid);
     const unsubTallies = onSnapshot(talliesRef, (snapshot) => {
       const records = {};
@@ -140,9 +149,13 @@ export default function App() {
       });
       setDailyRecords(records);
       setSyncStatus('Database Sinkron');
+      setSyncErrorMsg('');
     }, (err) => {
-      console.error(err);
+      console.error("Gagal sync data tally:", err);
       setSyncStatus('Gagal Sinkron');
+      if (err.code === 'permission-denied') {
+        setSyncErrorMsg('Akses ditolak. Cek Firebase Firestore Rules Anda.');
+      }
     });
 
     return () => { unsubSettings(); unsubTallies(); };
@@ -317,7 +330,7 @@ export default function App() {
         const tallyRef = getTallyDoc(user.uid, todayStr);
         await setDoc(tallyRef, updatedTally, { merge: true });
       } catch (error) {
-        console.error("Gagal sinkron:", error);
+        console.error("Gagal sinkron tally:", error);
       }
     }
   };
@@ -403,50 +416,13 @@ export default function App() {
   };
 
   const exportToPDF = () => {
-    const element = document.getElementById('print-area');
-    if (window.html2pdf && element) {
-      const noPrintElements = element.querySelectorAll('.no-print');
-      noPrintElements.forEach(el => el.style.display = 'none');
-      const printOnlyElements = element.querySelectorAll('.print-only');
-      printOnlyElements.forEach(el => el.style.display = 'block');
-
-      const opt = {
-        margin:       0.5,
-        filename:     `Laporan_Perpus_${activeTab}.pdf`,
-        image:        { type: 'jpeg', quality: 0.98 },
-        html2canvas:  { scale: 2, useCORS: true },
-        jsPDF:        { unit: 'in', format: 'a4', orientation: 'portrait' }
-      };
-
-      window.html2pdf().set(opt).from(element).save().then(() => {
-        noPrintElements.forEach(el => el.style.display = '');
-        printOnlyElements.forEach(el => el.style.display = '');
-      });
-    } else {
-      window.print();
-    }
+    window.print();
   };
 
-  useEffect(() => {
-    const link = document.createElement('link');
-    link.href = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap';
-    link.rel = 'stylesheet';
-    document.head.appendChild(link);
-
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
-    script.async = true;
-    document.body.appendChild(script);
-
-    return () => {
-      document.head.removeChild(link);
-      if (document.body.contains(script)) document.body.removeChild(script);
-    };
-  }, []);
-
+  // --- RENDER LOGIN ---
   if (!isLoggedIn) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-[#0B666A] to-[#044A42]" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
+      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-[#0B666A] to-[#044A42] p-4" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
         <div className="bg-white p-8 rounded-3xl shadow-2xl w-full max-w-md border border-white/20">
           <div className="flex flex-col items-center mb-8">
             <div className="w-24 h-24 mb-4 bg-white rounded-full flex items-center justify-center overflow-hidden border-4 border-[#0B666A] shadow-lg">
@@ -482,7 +458,7 @@ export default function App() {
                 <input 
                   type="password" 
                   className="w-full pl-10 pr-4 py-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-[#0B666A] focus:border-transparent outline-none transition-all"
-                  placeholder="••••••••"
+                  placeholder="admin123"
                   value={loginData.password}
                   onChange={(e) => setLoginData({...loginData, password: e.target.value})}
                   required
@@ -504,9 +480,11 @@ export default function App() {
 
   const activeData = getActiveData();
 
+  // --- RENDER DASHBOARD ---
   return (
     <div className="flex h-screen overflow-hidden bg-gradient-to-br from-white via-slate-50 to-[#eef7f6]" style={{ fontFamily: "'Plus Jakarta Sans', sans-serif" }}>
       <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
         @media print {
           .no-print { display: none !important; }
           .print-only { display: block !important; }
@@ -519,7 +497,7 @@ export default function App() {
       `}</style>
 
       {/* SIDEBAR */}
-      <aside className={`no-print ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} fixed md:relative z-20 transition-transform duration-300 ease-in-out w-64 h-full bg-gradient-to-b from-[#0B666A] via-[#0f7a7f] to-[#0a5255] text-white shadow-2xl flex flex-col`}>
+      <aside className={`no-print ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} absolute md:relative z-40 transition-transform duration-300 ease-in-out w-64 h-full bg-gradient-to-b from-[#0B666A] via-[#0f7a7f] to-[#0a5255] text-white shadow-2xl flex flex-col`}>
         <div className="p-6 flex justify-between items-center border-b border-white/10">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 bg-white/20 p-1 rounded-lg backdrop-blur-sm flex items-center justify-center">
@@ -539,7 +517,7 @@ export default function App() {
         <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
           <p className="px-3 text-xs font-semibold text-[#97FEED] uppercase tracking-wider mb-4 opacity-70">Laporan Statistik</p>
           {['harian', 'pekanan', 'bulanan', 'tahunan', 'analisis'].map((tab) => (
-            <button key={tab} onClick={() => setActiveTab(tab)} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 capitalize ${activeTab === tab ? 'bg-white/15 text-white shadow-[0_0_15px_rgba(151,254,237,0.1)] border border-white/10' : 'text-white/70 hover:bg-white/5 hover:text-white'}`}>
+            <button key={tab} onClick={() => { setActiveTab(tab); setIsSidebarOpen(window.innerWidth > 768); }} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 capitalize ${activeTab === tab ? 'bg-white/15 text-white shadow-[0_0_15px_rgba(151,254,237,0.1)] border border-white/10' : 'text-white/70 hover:bg-white/5 hover:text-white'}`}>
               {tab === 'harian' && <LayoutDashboard size={18} />}
               {tab === 'pekanan' && <CalendarDays size={18} />}
               {tab === 'bulanan' && <Calendar size={18} />}
@@ -549,7 +527,7 @@ export default function App() {
             </button>
           ))}
           <p className="px-3 text-xs font-semibold text-[#97FEED] uppercase tracking-wider mt-8 mb-4 opacity-70">Manajemen</p>
-          <button onClick={() => setActiveTab('pengaturan')} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${activeTab === 'pengaturan' ? 'bg-white/15 text-white shadow-[0_0_15px_rgba(151,254,237,0.1)] border border-white/10' : 'text-white/70 hover:bg-white/5 hover:text-white'}`}>
+          <button onClick={() => { setActiveTab('pengaturan'); setIsSidebarOpen(window.innerWidth > 768); }} className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${activeTab === 'pengaturan' ? 'bg-white/15 text-white shadow-[0_0_15px_rgba(151,254,237,0.1)] border border-white/10' : 'text-white/70 hover:bg-white/5 hover:text-white'}`}>
             <Settings size={18} />
             <span className="font-medium">Pengaturan</span>
           </button>
@@ -560,9 +538,13 @@ export default function App() {
         </nav>
       </aside>
 
+      {/* OVERLAY FOR MOBILE SIDEBAR */}
+      {isSidebarOpen && <div className="md:hidden fixed inset-0 bg-black/40 z-30" onClick={() => setIsSidebarOpen(false)}></div>}
+
       {/* MAIN CONTENT AREA */}
       <main id="print-area" className="flex-1 flex flex-col h-full overflow-hidden relative print-container">
         
+        {/* HEADER LAPORAN (HANYA MUNCUL SAAT PRINT) */}
         <div className="print-only mb-8 text-center border-b-2 border-black pb-4">
           <div className="flex flex-col items-center justify-center space-y-2">
              <img src={settings.logo} alt="Logo" className="w-24 h-24 object-contain" />
@@ -574,7 +556,7 @@ export default function App() {
           </div>
         </div>
 
-        <header className="no-print bg-white/60 backdrop-blur-md border-b border-gray-100 p-4 md:p-6 flex justify-between items-center z-10 sticky top-0">
+        <header className="no-print bg-white/80 backdrop-blur-md border-b border-gray-100 p-4 md:p-6 flex justify-between items-center z-10 sticky top-0">
           <div className="flex items-center space-x-4">
             <button className="md:hidden p-2 bg-white rounded-lg shadow-sm text-[#0B666A]" onClick={() => setIsSidebarOpen(true)}>
               <Menu size={20} />
@@ -584,19 +566,32 @@ export default function App() {
               <p className="text-sm text-gray-500 font-medium">{activeTab === 'pengaturan' ? 'Kustomisasi Data Institusi' : 'Dashboard Pemantauan Pengunjung Real-time'}</p>
             </div>
           </div>
+          
+          <div className="flex items-center space-x-3">
+            {syncErrorMsg && (
+              <div className="hidden md:flex items-center space-x-1 text-red-500 text-xs font-semibold bg-red-50 px-3 py-1.5 rounded-full border border-red-100">
+                <AlertCircle size={14} />
+                <span>{syncErrorMsg}</span>
+              </div>
+            )}
+            <div className="flex items-center space-x-2 bg-white px-3 py-1.5 rounded-full border border-gray-100 shadow-sm">
+              <div className={`w-2 h-2 rounded-full ${syncStatus === 'Database Sinkron' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></div>
+              <span className="text-xs font-semibold text-gray-600 hidden sm:inline">{syncStatus}</span>
+            </div>
+          </div>
         </header>
 
         <div className="flex-1 overflow-y-auto p-4 md:p-8">
           
           {activeTab === 'pengaturan' ? (
-            <div className="bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 max-w-2xl mx-auto p-8 mb-10">
+            <div className="bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 max-w-2xl mx-auto p-6 md:p-8 mb-10">
               <h3 className="text-xl font-bold text-[#044A42] mb-6 border-b pb-4">Informasi Institusi & Laporan</h3>
               <div className="space-y-6">
                 <div>
                   <label className="text-sm font-semibold text-gray-600 block mb-2">Logo Pustaka</label>
                   <div className="flex items-center space-x-4">
                     <img src={settings.logo} alt="Preview Logo" className="w-20 h-20 rounded-lg object-contain bg-slate-50 border border-gray-200 p-2" />
-                    <input type="file" accept="image/*" onChange={handleLogoUpload} className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100 cursor-pointer" />
+                    <input type="file" accept="image/*" onChange={handleLogoUpload} className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-[#eef7f6] file:text-[#0B666A] hover:file:bg-[#d6eff0] cursor-pointer" />
                   </div>
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -640,214 +635,188 @@ export default function App() {
             </div>
           ) : (
             <>
+              {/* TOMBOL TALLY CEPAT (HANYA MUNCUL SAAT TIDAK PRINT) */}
               <div className="mb-8 no-print">
-                <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4 flex items-center justify-between">
-                  <span>Input Data Cepat ({formatTanggal(new Date())})</span>
-                  <div className="flex items-center space-x-2 bg-white px-3 py-1 rounded-full border border-gray-100 shadow-sm">
-                    <div className={`w-2 h-2 rounded-full ${syncStatus === 'Database Sinkron' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></div>
-                    <span className="text-xs font-semibold text-gray-600">{syncStatus}</span>
-                  </div>
-                </h3>
+                <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider mb-4">Input Data Cepat ({formatTanggal(new Date())})</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 md:gap-6">
+                  {[
+                    { type: 'pengunjung', label: 'Pengunjung', icon: Users, bg: 'bg-[#eef7f6]', text: 'text-[#0B666A]', gradient: 'from-[#35A29F]/10' },
+                    { type: 'pembaca', label: 'Pembaca', icon: BookOpen, bg: 'bg-[#f0f9f8]', text: 'text-[#35A29F]', gradient: 'from-[#35A29F]/10' },
+                    { type: 'peminjam', label: 'Peminjam', icon: ArrowUpRight, bg: 'bg-white', text: 'text-[#044A42]', gradient: 'from-gray-200/50' }
+                  ].map((item) => (
+                    <button 
+                      key={item.type}
+                      onClick={() => handleTallyClick(item.type)} 
+                      className="group relative bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_8px_30px_rgba(11,102,106,0.12)] border border-gray-100 transition-all duration-300 hover:-translate-y-1 overflow-hidden text-left cursor-pointer"
+                    >
+                      <div className={`absolute top-0 right-0 w-32 h-32 bg-gradient-to-br ${item.gradient} to-transparent rounded-bl-full -mr-8 -mt-8 transition-transform group-hover:scale-110`}></div>
+                      <div className="flex justify-between items-start relative z-10">
+                        <div>
+                          <p className="text-gray-500 text-xs sm:text-sm font-medium mb-1">Klik untuk menambah</p>
+                          <h4 className={`text-xl sm:text-2xl font-bold ${item.text} mb-4`}>+ {item.label}</h4>
+                        </div>
+                        <div className={`${item.bg} p-3 sm:p-4 rounded-2xl ${item.text}`}>
+                          <item.icon size={24} className="sm:w-7 sm:h-7" />
+                        </div>
+                      </div>
+                      <div className="flex items-end space-x-2 relative z-10">
+                        <span className="text-3xl sm:text-4xl font-black text-gray-800">{currentTodayTally[item.type] || 0}</span>
+                        <span className="text-gray-400 text-sm mb-1 font-medium">hari ini</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* FILTERING AREA */}
+              <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4 mb-6 flex flex-col md:flex-row justify-between items-start md:items-center space-y-4 md:space-y-0 no-print">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-800 capitalize">Statistik Data {activeTab}</h3>
+                  <p className="text-sm text-gray-500">Visualisasi kunjungan perpustakaan</p>
+                </div>
                 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
-                  <button onClick={() => handleTallyClick('pengunjung')} className="group relative bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_8px_30px_rgba(11,102,106,0.12)] border border-gray-100 transition-all duration-300 hover:-translate-y-1 overflow-hidden text-left cursor-pointer">
-                    <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-[#35A29F]/10 to-transparent rounded-bl-full -mr-8 -mt-8 transition-transform group-hover:scale-110"></div>
-                    <div className="flex justify-between items-start relative z-10">
-                      <div>
-                        <p className="text-gray-500 text-sm font-medium mb-1">Klik untuk menambah</p>
-                        <h4 className="text-2xl font-bold text-[#0B666A] mb-4">+ Pengunjung</h4>
-                      </div>
-                      <div className="bg-[#eef7f6] p-4 rounded-2xl text-[#0B666A]">
-                        <Users size={28} />
-                      </div>
-                    </div>
-                    <div className="flex items-end justify-between relative z-10 mt-2">
-                      <div className="text-5xl font-black text-[#044A42]">{currentTodayTally.pengunjung}</div>
-                      <div className="text-xs font-semibold text-emerald-600 bg-emerald-50 px-3 py-1.5 rounded-lg">Total Hari Ini</div>
-                    </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  {activeTab === 'bulanan' && (
+                    <select value={bulanFilter} onChange={(e) => setBulanFilter(e.target.value)} className="px-4 py-2 border border-gray-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#0B666A]">
+                      <option value="harian_sebulan">Data Harian (Bulan Ini)</option>
+                      <option value="bulanan_setahun">Data Bulanan (Tahun Ini)</option>
+                    </select>
+                  )}
+                  {activeTab === 'analisis' && (
+                    <select value={analisisFilter} onChange={(e) => setAnalisisFilter(e.target.value)} className="px-4 py-2 border border-gray-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-[#0B666A]">
+                      <option value="hari_ini">Hari Ini</option>
+                      <option value="7_hari">7 Hari Terakhir</option>
+                      <option value="bulan_ini">Bulan Ini</option>
+                      <option value="tahun_ini">Tahun Ini</option>
+                      <option value="5_tahun">5 Tahun Terakhir</option>
+                    </select>
+                  )}
+                  <button onClick={exportToCSV} className="flex items-center space-x-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 px-4 py-2 rounded-xl text-sm font-semibold transition-colors">
+                    <Download size={16} />
+                    <span className="hidden sm:inline">Export CSV</span>
                   </button>
-
-                  <button onClick={() => handleTallyClick('pembaca')} className="group relative bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_8px_30px_rgba(59,130,246,0.12)] border border-gray-100 transition-all duration-300 hover:-translate-y-1 overflow-hidden text-left cursor-pointer">
-                    <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-blue-500/10 to-transparent rounded-bl-full -mr-8 -mt-8 transition-transform group-hover:scale-110"></div>
-                    <div className="flex justify-between items-start relative z-10">
-                      <div>
-                        <p className="text-gray-500 text-sm font-medium mb-1">Klik untuk menambah</p>
-                        <h4 className="text-2xl font-bold text-blue-600 mb-4">+ Pembaca</h4>
-                      </div>
-                      <div className="bg-blue-50 p-4 rounded-2xl text-blue-600">
-                        <BookOpen size={28} />
-                      </div>
-                    </div>
-                    <div className="flex items-end justify-between relative z-10 mt-2">
-                      <div className="text-5xl font-black text-gray-800">{currentTodayTally.pembaca}</div>
-                      <div className="text-xs font-semibold text-blue-600 bg-blue-50 px-3 py-1.5 rounded-lg">Total Hari Ini</div>
-                    </div>
-                  </button>
-
-                  <button onClick={() => handleTallyClick('peminjam')} className="group relative bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] hover:shadow-[0_8px_30px_rgba(245,158,11,0.12)] border border-gray-100 transition-all duration-300 hover:-translate-y-1 overflow-hidden text-left cursor-pointer">
-                    <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-to-br from-amber-500/10 to-transparent rounded-bl-full -mr-8 -mt-8 transition-transform group-hover:scale-110"></div>
-                    <div className="flex justify-between items-start relative z-10">
-                      <div>
-                        <p className="text-gray-500 text-sm font-medium mb-1">Klik untuk menambah</p>
-                        <h4 className="text-2xl font-bold text-amber-500 mb-4">+ Peminjam</h4>
-                      </div>
-                      <div className="bg-amber-50 p-4 rounded-2xl text-amber-500">
-                        <ArrowUpRight size={28} />
-                      </div>
-                    </div>
-                    <div className="flex items-end justify-between relative z-10 mt-2">
-                      <div className="text-5xl font-black text-gray-800">{currentTodayTally.peminjam}</div>
-                      <div className="text-xs font-semibold text-amber-600 bg-amber-50 px-3 py-1.5 rounded-lg">Total Hari Ini</div>
-                    </div>
+                  <button onClick={exportToPDF} className="flex items-center space-x-2 bg-slate-50 text-slate-700 hover:bg-slate-100 px-4 py-2 rounded-xl text-sm font-semibold transition-colors border border-slate-200">
+                    <Printer size={16} />
+                    <span className="hidden sm:inline">Cetak PDF</span>
                   </button>
                 </div>
               </div>
 
-              <div className="bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 overflow-hidden mb-10 relative">
-                <div className="p-6 md:p-8 border-b border-gray-100 flex flex-col md:flex-row md:justify-between md:items-center gap-4 no-print">
-                  <div>
-                    <h3 className="text-xl font-bold text-[#044A42]">Laporan Statistik {activeTab === 'analisis' ? 'Jam Sibuk' : activeTab.charAt(0).toUpperCase() + activeTab.slice(1)}</h3>
-                    <p className="text-gray-500 text-sm mt-1">
-                      {activeTab === 'harian' && 'Grafik pengunjung hari ini berdasarkan jam kunjungan.'}
-                      {activeTab === 'pekanan' && 'Rekapitulasi dari hari Senin sampai Sabtu pekan ini.'}
-                      {activeTab === 'bulanan' && 'Perbandingan data laporan dalam rentang bulan atau setahun.'}
-                      {activeTab === 'tahunan' && 'Perkembangan jumlah pengunjung perpustakaan per tahun.'}
-                      {activeTab === 'analisis' && 'Analisis jam puncak kunjungan perpustakaan.'}
-                    </p>
-                  </div>
-                  
-                  {/* TOMBOL EXPORT FLEKSIBEL & FILTER */}
-                  <div className="flex flex-wrap items-center gap-3">
-                    {activeTab === 'bulanan' && (
-                      <div className="flex bg-slate-100 p-1 rounded-lg border border-gray-200 mr-2">
-                        <button onClick={() => setBulanFilter('harian_sebulan')} className={`px-4 py-2 text-sm font-semibold rounded-md transition-all ${bulanFilter === 'harian_sebulan' ? 'bg-white text-[#0B666A] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>Harian</button>
-                        <button onClick={() => setBulanFilter('bulanan_setahun')} className={`px-4 py-2 text-sm font-semibold rounded-md transition-all ${bulanFilter === 'bulanan_setahun' ? 'bg-white text-[#0B666A] shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>Bulanan</button>
-                      </div>
-                    )}
-                    {activeTab === 'analisis' && (
-                      <div className="flex flex-wrap items-center gap-2 mr-2">
-                        <select 
-                          value={analisisFilter} 
-                          onChange={(e) => setAnalisisFilter(e.target.value)}
-                          className="bg-slate-100 border border-gray-200 text-gray-700 text-sm rounded-lg focus:ring-[#0B666A] focus:border-[#0B666A] block p-2"
-                        >
-                          <option value="hari_ini">Hari Ini</option>
-                          <option value="7_hari">7 Hari Terakhir</option>
-                          <option value="bulan_ini">Bulan Ini</option>
-                          <option value="tahun_ini">Tahun Ini</option>
-                          <option value="5_tahun">5 Tahun Terakhir</option>
-                          <option value="kustom">Periode Kustom</option>
-                        </select>
-                        {analisisFilter === 'kustom' && (
-                          <div className="flex items-center space-x-2">
-                            <input type="date" value={customDate.start} onChange={(e) => setCustomDate({...customDate, start: e.target.value})} className="bg-slate-100 border border-gray-200 text-gray-700 text-sm rounded-lg p-2" />
-                            <span className="text-gray-500">-</span>
-                            <input type="date" value={customDate.end} onChange={(e) => setCustomDate({...customDate, end: e.target.value})} className="bg-slate-100 border border-gray-200 text-gray-700 text-sm rounded-lg p-2" />
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    <button onClick={exportToCSV} className="flex items-center space-x-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 px-4 py-2 rounded-lg font-semibold text-sm transition-colors border border-emerald-200">
-                      <FileSpreadsheet size={16} /> <span>Excel/CSV</span>
-                    </button>
-                    <button onClick={exportToPDF} className="flex items-center space-x-2 bg-blue-50 hover:bg-blue-100 text-blue-700 px-4 py-2 rounded-lg font-semibold text-sm transition-colors border border-blue-200">
-                      <FileText size={16} /> <span>PDF Print</span>
-                    </button>
-                  </div>
-                </div>
-                
-                <div className="p-6 md:p-8">
-                  <h3 className="print-only text-xl font-bold mb-6 text-center border-b pb-2">DATA STATISTIK {activeTab === 'analisis' ? 'JAM SIBUK' : activeTab.toUpperCase()}</h3>
-                  
-                  {activeTab === 'analisis' && (
-                    <div className="mb-6 p-4 bg-emerald-50 border border-emerald-100 rounded-2xl flex items-center space-x-4">
-                      <div className="bg-emerald-500 p-3 rounded-xl text-white shadow-sm">
-                        <Clock size={24} />
-                      </div>
-                      <div>
-                        <p className="text-emerald-800 font-semibold text-sm">Waktu Tersibuk (Jam Puncak Kunjungan)</p>
-                        <p className="text-2xl font-bold text-[#044A42]">
-                          {jamPuncakInfo.jam !== '-' ? `${jamPuncakInfo.jam} - ${String(parseInt(jamPuncakInfo.jam) + 1).padStart(2, '0')}:00` : 'Belum Ada Data'} 
-                          <span className="text-lg font-medium text-emerald-600 ml-2">({jamPuncakInfo.total} Pengunjung)</span>
-                        </p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* GRAFIK GARIS (LINE CHART) ESTETIK */}
-                  <div className="h-[380px] w-full mb-12 mt-4">
+              {/* CHART & TABLE AREA */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-10">
+                {/* CHART CONTAINER */}
+                <div className="lg:col-span-2 bg-white rounded-3xl shadow-sm border border-gray-100 p-6">
+                  <h4 className="text-md font-bold text-gray-700 mb-6">Grafik Perkembangan</h4>
+                  <div className="h-[300px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={activeData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
-                        <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 13, fontWeight: 500 }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#6b7280', fontSize: 13, fontWeight: 500 }} />
-                        <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 25px rgba(0,0,0,0.1)', fontWeight: 600 }} cursor={{stroke: '#e5e7eb', strokeWidth: 2}} />
-                        <Legend iconType="circle" wrapperStyle={{ paddingTop: '20px', fontWeight: 600, fontSize: '14px' }}/>
-                        
-                        <Line type="monotone" dataKey="pengunjung" name="Pengunjung" stroke="#0B666A" strokeWidth={4} activeDot={{ r: 8, strokeWidth: 0 }} dot={{ r: 4, strokeWidth: 2, fill: '#fff' }} />
-                        <Line type="monotone" dataKey="pembaca" name="Pembaca Buku" stroke="#3b82f6" strokeWidth={4} activeDot={{ r: 8, strokeWidth: 0 }} dot={{ r: 4, strokeWidth: 2, fill: '#fff' }} />
-                        <Line type="monotone" dataKey="peminjam" name="Peminjam Buku" stroke="#f59e0b" strokeWidth={4} activeDot={{ r: 8, strokeWidth: 0 }} dot={{ r: 4, strokeWidth: 2, fill: '#fff' }} />
-                      </LineChart>
+                      {(activeTab === 'bulanan' && bulanFilter === 'bulanan_setahun') || activeTab === 'tahunan' ? (
+                        <BarChart data={activeData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                          <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#888', fontSize: 12}} dy={10} />
+                          <YAxis axisLine={false} tickLine={false} tick={{fill: '#888', fontSize: 12}} />
+                          <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} cursor={{fill: '#f8fafc'}} />
+                          <Legend wrapperStyle={{ paddingTop: '20px' }} iconType="circle" />
+                          <Bar dataKey="pengunjung" name="Pengunjung" fill="#0B666A" radius={[4, 4, 0, 0]} barSize={20} />
+                          <Bar dataKey="pembaca" name="Pembaca" fill="#35A29F" radius={[4, 4, 0, 0]} barSize={20} />
+                          <Bar dataKey="peminjam" name="Peminjam" fill="#97FEED" radius={[4, 4, 0, 0]} barSize={20} />
+                        </BarChart>
+                      ) : (
+                        <LineChart data={activeData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                          <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#888', fontSize: 12}} dy={10} />
+                          <YAxis axisLine={false} tickLine={false} tick={{fill: '#888', fontSize: 12}} />
+                          <Tooltip contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)' }} />
+                          <Legend wrapperStyle={{ paddingTop: '20px' }} iconType="circle" />
+                          <Line type="monotone" dataKey="pengunjung" name="Pengunjung" stroke="#0B666A" strokeWidth={3} dot={{r: 4, fill: '#0B666A', strokeWidth: 0}} activeDot={{r: 6}} />
+                          <Line type="monotone" dataKey="pembaca" name="Pembaca" stroke="#35A29F" strokeWidth={3} dot={{r: 4, fill: '#35A29F', strokeWidth: 0}} />
+                          <Line type="monotone" dataKey="peminjam" name="Peminjam" stroke="#97FEED" strokeWidth={3} dot={{r: 4, fill: '#97FEED', strokeWidth: 0}} />
+                        </LineChart>
+                      )}
                     </ResponsiveContainer>
                   </div>
+                </div>
 
-                  <div className="overflow-x-auto print:mt-10">
-                    <table className="w-full text-left border-collapse border print:border-black rounded-xl overflow-hidden">
-                      <thead>
-                        <tr className="bg-slate-50 border-b border-gray-200 print:bg-gray-200 print:border-black">
-                          <th className="py-4 px-6 text-sm font-bold text-gray-700 uppercase print:border-black print:border">
-                            {activeTab === 'harian' || activeTab === 'analisis' ? 'Jam Kunjungan' : activeTab === 'pekanan' ? 'Hari (Tanggal)' : 'Periode'}
-                          </th>
-                          <th className="py-4 px-6 text-sm font-bold text-[#0B666A] uppercase print:border-black print:border">Pengunjung</th>
-                          <th className="py-4 px-6 text-sm font-bold text-blue-600 uppercase print:border-black print:border">Pembaca</th>
-                          <th className="py-4 px-6 text-sm font-bold text-amber-500 uppercase print:border-black print:border">Peminjam</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {activeData.map((row, index) => (
-                          <tr key={index} className="border-b border-gray-100 hover:bg-slate-50/50 transition-colors print:border-black">
-                            <td className="py-4 px-6 font-bold text-gray-700 print:border-black print:border">
-                              {row.name} {row.tanggal ? <span className="font-normal text-gray-500 text-sm block md:inline md:ml-2">({row.tanggal})</span> : ''}
-                            </td>
-                            <td className="py-4 px-6 font-semibold text-gray-600 print:border-black print:border">
-                              {row.pengunjung.toLocaleString()}
-                            </td>
-                            <td className="py-4 px-6 font-medium text-gray-600 print:border-black print:border">{row.pembaca.toLocaleString()}</td>
-                            <td className="py-4 px-6 font-medium text-gray-600 print:border-black print:border">{row.peminjam.toLocaleString()}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                {/* SUMMARY / INFO BOXES */}
+                <div className="flex flex-col space-y-4">
+                  <div className="bg-[#0B666A] rounded-3xl p-6 text-white shadow-lg relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full blur-2xl -mr-10 -mt-10"></div>
+                    <h4 className="text-white/80 text-sm font-semibold mb-1">Total Kunjungan (Periode Ini)</h4>
+                    <p className="text-4xl font-black mb-4">{activeData.reduce((acc, curr) => acc + (curr.pengunjung || 0), 0)}</p>
+                    <div className="flex justify-between items-center text-sm bg-black/20 p-3 rounded-xl backdrop-blur-sm">
+                      <span className="flex items-center"><BookOpen size={14} className="mr-2" /> Pembaca: {activeData.reduce((acc, curr) => acc + (curr.pembaca || 0), 0)}</span>
+                      <span className="flex items-center"><ArrowUpRight size={14} className="mr-2" /> Peminjam: {activeData.reduce((acc, curr) => acc + (curr.peminjam || 0), 0)}</span>
+                    </div>
                   </div>
 
-                  {/* BAGIAN TANDA TANGAN */}
-                  <table className="print-only mt-16 w-full text-center" style={{ tableLayout: 'fixed' }}>
-                    <tbody>
-                      <tr>
-                        <td style={{ verticalAlign: 'top', width: '50%' }}>
-                          <p className="mb-24 text-base">Mengetahui,<br/>Kepala Sekolah</p>
-                          <p className="font-bold underline text-lg">{settings.namaKepsek}</p>
-                          <p className="text-sm">NIP. {settings.nipKepsek}</p>
-                        </td>
-                        <td style={{ verticalAlign: 'top', width: '50%' }}>
-                          <p className="mb-24 text-base">{settings.namaKota || 'Nama Kota'}, {formatTanggal(new Date())}<br/>Pustakawan</p>
-                          <p className="font-bold underline text-lg">{settings.namaPustakawan}</p>
-                          <p className="text-sm">NIP. {settings.nipPustakawan}</p>
-                        </td>
+                  {activeTab === 'analisis' && (
+                    <div className="bg-white border border-emerald-100 rounded-3xl p-6 shadow-sm">
+                      <div className="flex items-center space-x-3 mb-4">
+                        <div className="bg-emerald-100 p-2 rounded-lg text-emerald-600"><Clock size={20} /></div>
+                        <h4 className="font-bold text-gray-700">Analisis Jam Puncak</h4>
+                      </div>
+                      <p className="text-sm text-gray-500 mb-2">Waktu paling sibuk berdasarkan filter saat ini terjadi pada jam:</p>
+                      <div className="text-3xl font-black text-[#044A42]">{jamPuncakInfo.jam}</div>
+                      <p className="text-xs text-emerald-600 font-semibold mt-1">Rata-rata / Total: {jamPuncakInfo.total} orang</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* DATA TABLE */}
+              <div className="bg-white rounded-3xl shadow-sm border border-gray-100 overflow-hidden">
+                <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+                  <h4 className="text-md font-bold text-gray-700">Rincian Data Tabular</h4>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-gray-100">
+                        <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">{activeTab === 'pekanan' ? 'Hari' : 'Periode / Waktu'}</th>
+                        {activeTab === 'pekanan' && <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">Tanggal</th>}
+                        <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">Pengunjung</th>
+                        <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">Pembaca</th>
+                        <th className="px-6 py-4 text-xs font-semibold text-gray-500 uppercase tracking-wider">Peminjam</th>
                       </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {activeData.map((row, idx) => (
+                        <tr key={idx} className="hover:bg-slate-50 transition-colors">
+                          <td className="px-6 py-4 text-sm font-medium text-gray-800">{row.name}</td>
+                          {activeTab === 'pekanan' && <td className="px-6 py-4 text-sm text-gray-600">{row.tanggal}</td>}
+                          <td className="px-6 py-4 text-sm font-semibold text-[#0B666A]">{row.pengunjung || 0}</td>
+                          <td className="px-6 py-4 text-sm font-semibold text-[#35A29F]">{row.pembaca || 0}</td>
+                          <td className="px-6 py-4 text-sm font-semibold text-[#97FEED]">{row.peminjam || 0}</td>
+                        </tr>
+                      ))}
+                      {activeData.length === 0 && (
+                        <tr>
+                          <td colSpan={activeTab === 'pekanan' ? 5 : 4} className="px-6 py-8 text-center text-sm text-gray-500">Tidak ada data untuk periode ini</td>
+                        </tr>
+                      )}
                     </tbody>
                   </table>
+                </div>
+              </div>
 
+              {/* TANDA TANGAN LAPORAN (HANYA PRINT) */}
+              <div className="print-only mt-16 px-10">
+                <div className="flex justify-between items-start text-center">
+                  <div>
+                    <p className="mb-20">Mengetahui,<br/>Kepala {settings.namaSekolah}</p>
+                    <p className="font-bold underline">{settings.namaKepsek}</p>
+                    <p>NIP. {settings.nipKepsek}</p>
+                  </div>
+                  <div>
+                    <p className="mb-20">{settings.namaKota}, {formatTanggal(new Date())}<br/>Pustakawan</p>
+                    <p className="font-bold underline">{settings.namaPustakawan}</p>
+                    <p>NIP. {settings.nipPustakawan}</p>
+                  </div>
                 </div>
               </div>
             </>
           )}
         </div>
       </main>
-      
-      {isSidebarOpen && (
-        <div className="fixed inset-0 bg-black/40 z-10 md:hidden backdrop-blur-sm no-print" onClick={() => setIsSidebarOpen(false)} />
-      )}
     </div>
   );
 }
